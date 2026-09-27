@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature-*
       - feature/**
 
 env:
@@ -59,4 +60,3 @@ jobs:
           echo "Backend image pushed successfully"
           echo "Image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}"
 
-          
