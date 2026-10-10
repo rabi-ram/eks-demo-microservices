@@ -4,47 +4,26 @@ on:
   push:
     branches:
       - main
-      - feature-*
-      - feature/**
+      - 'feature-*'
+      - 'feature/**'
+
+permissions:
+  contents: read
+  id-token: write
 
 env:
   AWS_REGION: ap-south-1
   ECR_REPOSITORY: eks-demo-backend
+  GITOPS_REPOSITORY: rabi-ram/eks-demo-gitops
+  GITOPS_FILE: apps/backend/deployment.yaml
 
 jobs:
   backend-ci:
-
     runs-on: ubuntu-latest
 
-    permissions:
-      id-token: write
-      contents: read
-
     steps:
-
-      - name: Checkout Repository
+      - name: Checkout Application Repository
         uses: actions/checkout@v4
-
-
-      - name: Debug GitHub Context
-        run: |
-          echo "Repository: ${{ github.repository }}"
-          echo "Ref: ${{ github.ref }}"
-          echo "Branch: ${{ github.ref_name }}"
-
-      - name: Print OIDC token claims
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const token = await core.getIDToken('sts.amazonaws.com')
-            const payload = JSON.parse(
-              Buffer.from(token.split('.')[1], 'base64').toString()
-            )
-
-            console.log("sub:", payload.sub)
-            console.log("aud:", payload.aud)
-            console.log("repository:", payload.repository)
-            console.log("ref:", payload.ref)
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -56,28 +35,93 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker Image
+      - name: Build Backend Image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \
-            -t $ECR_REPOSITORY:${{ github.sha }} \
-            -t $ECR_REPOSITORY:latest \
+          docker build \\
+            -t "$ECR_REPOSITORY:$IMAGE_TAG" \\
             ./backend
 
-      - name: Tag Docker Images
+      - name: Push SHA-Tagged Image to ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker tag $ECR_REPOSITORY:${{ github.sha }} \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}
+          set -euo pipefail
 
-          docker tag $ECR_REPOSITORY:latest \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:latest
+          docker tag "$ECR_REPOSITORY:$IMAGE_TAG" \\
+            "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-      - name: Push Images to ECR
+          docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Pushed image: $REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Create GitOps Pull Request
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}
-          docker push ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:latest
+          set -euo pipefail
 
-      - name: Pipeline Summary
-        run: |
-          echo "Backend image pushed successfully"
-          echo "Image: ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.sha }}"
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "GITOPS_TOKEN secret is not configured."
+            exit 1
+          fi
+
+          gh auth setup-git
+          git clone "https://github.com/${GITOPS_REPOSITORY}.git" gitops
+          cd gitops
+
+          BRANCH="update-backend-${IMAGE_TAG}"
+          git checkout -b "$BRANCH"
+
+          export IMAGE
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("apps/backend/deployment.yaml")
+          text = path.read_text()
+          lines = text.splitlines(keepends=True)
+
+          matches = [
+              i for i, line in enumerate(lines)
+              if line.lstrip().startswith("image:")
+              and "eks-demo-backend" in line
+          ]
+
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"Expected exactly one eks-demo-backend image line; found {len(matches)}"
+              )
+
+          index = matches[0]
+          newline = "\\n" if lines[index].endswith("\\n") else ""
+          indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+          lines[index] = f"{indent}image: {os.environ['IMAGE']}{newline}"
+          path.write_text("".join(lines))
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$GITOPS_FILE"
+
+          if git diff --cached --quiet; then
+            echo "No GitOps changes required."
+            exit 0
+          fi
+
+          git commit -m "Update backend image to ${IMAGE_TAG}"
+          git push origin "$BRANCH"
+
+          gh pr create \\
+            --repo "$GITOPS_REPOSITORY" \\
+            --base main \\
+            --head "$BRANCH" \\
+            --title "Update backend image to ${IMAGE_TAG}" \\
+            --body "Automated backend image update from application commit ${GITHUB_SHA}. Review and merge this pull request to deploy through Argo CD."
+
 
