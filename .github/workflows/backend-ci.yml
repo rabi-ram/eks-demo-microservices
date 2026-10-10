@@ -39,8 +39,8 @@ jobs:
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \\
-            -t "$ECR_REPOSITORY:$IMAGE_TAG" \\
+          docker build \
+            -t "$ECR_REPOSITORY:$IMAGE_TAG" \
             ./backend
 
       - name: Push SHA-Tagged Image to ECR
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker tag "$ECR_REPOSITORY:$IMAGE_TAG" \\
+          docker tag "$ECR_REPOSITORY:$IMAGE_TAG" \
             "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
           docker push "$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
