@@ -25,6 +25,47 @@ jobs:
       - name: Checkout Application Repository
         uses: actions/checkout@v4
 
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-test.txt
+
+      - name: Install Test Dependencies
+        working-directory: backend
+        run: |
+          python -m pip install -r requirements-test.txt
+
+      - name: Run Backend Unit Tests
+        working-directory: backend
+        env:
+          AWS_REGION: ap-south-1
+          S3_BUCKET: unit-test-bucket
+          AWS_EC2_METADATA_DISABLED: 'true'
+          AWS_ACCESS_KEY_ID: testing
+          AWS_SECRET_ACCESS_KEY: testing
+        run: |
+          python -m pytest -v
+
+      - name: Build Backend Image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t "$ECR_REPOSITORY:$IMAGE_TAG" \
+            ./backend
+
+      - name: Scan Image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: eks-demo-backend:${{ github.sha }}
+          format: table
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -34,14 +75,6 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build Backend Image
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build \
-            -t "$ECR_REPOSITORY:$IMAGE_TAG" \
-            ./backend
 
       - name: Push SHA-Tagged Image to ECR
         env:
@@ -99,7 +132,7 @@ jobs:
               )
 
           index = matches[0]
-          newline = "\\n" if lines[index].endswith("\\n") else ""
+          newline = "\n" if lines[index].endswith("\n") else ""
           indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
           lines[index] = f"{indent}image: {os.environ['IMAGE']}{newline}"
           path.write_text("".join(lines))

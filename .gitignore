@@ -15,3 +15,6 @@ demo.txt
 *.tfstate
 *.tfstate.backup
 
+
+# Local test environment
+backend/.venv-test/
